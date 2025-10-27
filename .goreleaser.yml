@@ -41,59 +41,64 @@ builds:
     ldflags:
       - -X github.com/DataDog/chaos-controller/cli/chaosli/cmd.Version={{ .Tag }}
 
-dockers:
-  - image_templates:
-      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}/chaos-controller:{{ .Tag }}"
-      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}/chaos-controller:latest"
+dockers_v2:
+  - id: controller
+    images:
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}/chaos-controller"
+    tags:
+      - "{{ .Tag }}"
+      - "latest"
     dockerfile: bin/manager/Dockerfile
-    use: buildx
-    build_flag_templates:
-      - "--platform=linux/amd64"
-      - "--build-arg=BUILDGOVERSION={{ .Env.BUILDGOVERSION | default "1.23.1" }}"
-      - "--build-arg=BUILDSTAMP={{ .Date }}"
+    platforms:
+      - linux/amd64
+    build_args:
+      BUILDGOVERSION: "{{ .Env.BUILDGOVERSION | default \"1.23.1\" }}"
+      BUILDSTAMP: "{{ .Date }}"
     ids:
       - controller
 
-  - image_templates:
-      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}/chaos-injector:{{ .Tag }}"
-      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}/chaos-injector:latest"
+  - id: injector
+    images:
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}/chaos-injector"
+    tags:
+      - "{{ .Tag }}"
+      - "latest"
     dockerfile: bin/injector/Dockerfile
-    use: buildx
-    build_flag_templates:
-      - "--platform=linux/amd64"
-      - "--build-arg=BUILDGOVERSION={{ .Env.BUILDGOVERSION | default "1.23.1" }}"
-      - "--build-arg=BUILDSTAMP={{ .Date }}"
+    platforms:
+      - linux/amd64
+    build_args:
+      BUILDGOVERSION: "{{ .Env.BUILDGOVERSION | default \"1.23.1\" }}"
+      BUILDSTAMP: "{{ .Date }}"
     ids:
       - injector
 
-  - image_templates:
-      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}/chaos-handler:{{ .Tag }}"
-      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}/chaos-handler:latest"
+  - id: handler
+    images:
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}/chaos-handler"
+    tags:
+      - "{{ .Tag }}"
+      - "latest"
     dockerfile: bin/handler/Dockerfile
-    use: buildx
-    build_flag_templates:
-      - "--platform=linux/amd64"
-      - "--build-arg=BUILDGOVERSION={{ .Env.BUILDGOVERSION | default "1.23.1" }}"
-      - "--build-arg=BUILDSTAMP={{ .Date }}"
+    platforms:
+      - linux/amd64
+    build_args:
+      BUILDGOVERSION: "{{ .Env.BUILDGOVERSION | default \"1.23.1\" }}"
+      BUILDSTAMP: "{{ .Date }}"
     ids:
       - handler
 
 archives:
   - id: controller
-    builds:
-      - controller
-      - injector
-      - handler
+    ids: [controller, injector, handler]
     files:
-    - LICENSE
-    - LICENSE-3rdparty.csv
-    - NOTICE
-    - README.md
-    - docs/*
+      - LICENSE
+      - LICENSE-3rdparty.csv
+      - NOTICE
+      - README.md
+      - docs/*
   - id: chaosli
-    builds:
-      - chaosli
-    format: binary
+    ids: [chaosli]
+    formats: ['binary']
 release:
   extra_files:
     - glob: ./chart/install.yaml
