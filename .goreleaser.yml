@@ -34,9 +34,13 @@ builds:
   - id: chaosli
     binary: chaosli
     main: ./cli/chaosli
+    env:
+      - CGO_ENABLED=0
     goos:
       - linux
       - darwin
+    goarch:
+      - amd64
     ldflags:
       - -X github.com/DataDog/chaos-controller/cli/chaosli/cmd.Version={{ .Tag }}
 
@@ -51,7 +55,7 @@ dockers_v2:
     platforms:
       - linux/amd64
     build_args:
-      BUILDGOVERSION: "{{ .Env.BUILDGOVERSION | default \"1.23.1\" }}"
+      BUILDGOVERSION: "{{ .Env.BUILDGOVERSION }}"
       BUILDSTAMP: "{{ .Date }}"
     ids:
       - controller
@@ -66,7 +70,7 @@ dockers_v2:
     platforms:
       - linux/amd64
     build_args:
-      BUILDGOVERSION: "{{ .Env.BUILDGOVERSION | default \"1.23.1\" }}"
+      BUILDGOVERSION: "{{ .Env.BUILDGOVERSION }}"
       BUILDSTAMP: "{{ .Date }}"
     ids:
       - injector
@@ -81,7 +85,7 @@ dockers_v2:
     platforms:
       - linux/amd64
     build_args:
-      BUILDGOVERSION: "{{ .Env.BUILDGOVERSION | default \"1.23.1\" }}"
+      BUILDGOVERSION: "{{ .Env.BUILDGOVERSION }}"
       BUILDSTAMP: "{{ .Date }}"
     ids:
       - handler
