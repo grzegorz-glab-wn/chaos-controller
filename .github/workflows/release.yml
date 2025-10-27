@@ -3,11 +3,7 @@ name: release
 on:
   push:
     tags:
-      - "v*"  # Trigger on version tags for releases
-    branches:
-      - "**"  # Build on every branch push for testing
-  pull_request:
-    branches: [main, develop]
+      - "v*"  # Only trigger on version tags for releases
 
 jobs:
   goreleaser:
