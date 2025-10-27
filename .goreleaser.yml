@@ -1,31 +1,37 @@
+version: 2
+
 before:
   hooks:
     - go mod download
+    - make docker-build-ebpf  # Ensure eBPF builds for injector
 
 builds:
   - id: controller
     binary: manager
+    env:
+      - CGO_ENABLED=0
     goos:
       - linux
     goarch:
       - amd64
-      - arm64
   - id: injector
     binary: injector
     main: ./cli/injector
+    env:
+      - CGO_ENABLED=0
     goos:
       - linux
     goarch:
       - amd64
-      - arm64
   - id: handler
     binary: handler
     main: ./cli/handler
+    env:
+      - CGO_ENABLED=0
     goos:
       - linux
     goarch:
       - amd64
-      - arm64
   - id: chaosli
     binary: chaosli
     main: ./cli/chaosli
@@ -34,6 +40,44 @@ builds:
       - darwin
     ldflags:
       - -X github.com/DataDog/chaos-controller/cli/chaosli/cmd.Version={{ .Tag }}
+
+dockers:
+  - image_templates:
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}/chaos-controller:{{ .Tag }}"
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}/chaos-controller:latest"
+    dockerfile: bin/manager/Dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--build-arg=BUILDGOVERSION={{ .Env.BUILDGOVERSION | default "1.23.1" }}"
+      - "--build-arg=BUILDSTAMP={{ .Date }}"
+    ids:
+      - controller
+
+  - image_templates:
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}/chaos-injector:{{ .Tag }}"
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}/chaos-injector:latest"
+    dockerfile: bin/injector/Dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--build-arg=BUILDGOVERSION={{ .Env.BUILDGOVERSION | default "1.23.1" }}"
+      - "--build-arg=BUILDSTAMP={{ .Date }}"
+    ids:
+      - injector
+
+  - image_templates:
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}/chaos-handler:{{ .Tag }}"
+      - "ghcr.io/{{ .Env.GITHUB_REPOSITORY }}/chaos-handler:latest"
+    dockerfile: bin/handler/Dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--build-arg=BUILDGOVERSION={{ .Env.BUILDGOVERSION | default "1.23.1" }}"
+      - "--build-arg=BUILDSTAMP={{ .Date }}"
+    ids:
+      - handler
+
 archives:
   - id: controller
     builds:

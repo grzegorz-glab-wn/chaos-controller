@@ -57,6 +57,8 @@ type controllerConfig struct {
 	FinalizerDeletionDelay           time.Duration                   `json:"finalizerDeletionDelay" yaml:"finalizerDeletionDelay"`
 	TargetResourceMissingThreshold   time.Duration                   `json:"targetResourceMissingThreshold" yaml:"targetResourceMissingThreshold"`
 	DisabledDisruptions              []string                        `json:"disabledDisruptions" yaml:"disabledDisruptions"`
+	ClientGoQPS                      float64                         `json:"clientGoQPS" yaml:"clientGoQPS"`
+	ClientGoBurst                    int                             `json:"clientGoBurst" yaml:"clientGoBurst"`
 }
 
 type controllerWebhookConfig struct {
@@ -573,6 +575,18 @@ func New(client corev1client.ConfigMapInterface, logger *zap.SugaredLogger, osAr
 	mainFS.DurationVar(&cfg.Controller.TargetResourceMissingThreshold, "target-resource-missing-threshold", time.Hour*24, "Define the amount of time a cron or rollout will tolerate its target missing before self-deleting")
 
 	if err := viper.BindPFlag("controller.targetResourceMissingThreshold", mainFS.Lookup("target-resource-missing-threshold")); err != nil {
+		return cfg, err
+	}
+
+	mainFS.Float64Var(&cfg.Controller.ClientGoQPS, "client-go-qps", 20, "Number of queries per second client-go is allowed to make")
+
+	if err := viper.BindPFlag("controller.clientGoQPS", mainFS.Lookup("client-go-qps")); err != nil {
+		return cfg, err
+	}
+
+	mainFS.IntVar(&cfg.Controller.ClientGoBurst, "client-go-burst", 30, "Allowed burst queries for client-go")
+
+	if err := viper.BindPFlag("controller.clientGoBurst", mainFS.Lookup("client-go-burst")); err != nil {
 		return cfg, err
 	}
 
