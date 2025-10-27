@@ -36,11 +36,23 @@ jobs:
         uses: azure/setup-helm@v4
         with:
           version: v3.15.4
+
+      - name: Enable Helm OCI support
+        run: |
+          export HELM_EXPERIMENTAL_OCI=1
+
       - name: Generate install manifest
         run: >
           helm template ./chart/
           --set global.oci.registry=ghcr.io/${{ github.repository }} --set global.chaos.defaultImage.tag=${GITHUB_REF_NAME}
           > ./chart/install.yaml
+
+      - name: Package and push Helm chart
+        run: |
+          export HELM_EXPERIMENTAL_OCI=1
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username ${{ github.actor }} --password-stdin
+          helm package ./chart/
+          helm push chaos-controller-*.tgz oci://ghcr.io/${{ github.repository }}/helm
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
