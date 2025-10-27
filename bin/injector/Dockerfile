@@ -41,8 +41,8 @@ COPY --from=binaries /usr/lib/x86_64-linux-gn[u] /usr/lib/x86_64-linux-gnu/
 # no more sh
 COPY --from=binaries /usr/bin/test /bin/sh
 
-COPY injector_${TARGETARCH} /usr/local/bin/chaos-injector
-COPY injector_${TARGETARCH} /usr/local/bin/injector
+COPY ${TARGETARCH}/injector /usr/local/bin/chaos-injector
+COPY ${TARGETARCH}/injector /usr/local/bin/injector
 
 COPY dns_disruption_resolver.py /usr/local/bin/dns_disruption_resolver.py
 COPY ebpf/${TARGETARCH}/ /usr/local/bin/
