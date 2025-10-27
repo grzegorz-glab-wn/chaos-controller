@@ -13,6 +13,7 @@ builds:
       - linux
     goarch:
       - amd64
+      - arm64
   - id: injector
     binary: injector
     main: ./cli/injector
@@ -22,6 +23,7 @@ builds:
       - linux
     goarch:
       - amd64
+      - arm64
   - id: handler
     binary: handler
     main: ./cli/handler
@@ -31,6 +33,7 @@ builds:
       - linux
     goarch:
       - amd64
+      - arm64
   - id: chaosli
     binary: chaosli
     main: ./cli/chaosli
@@ -41,6 +44,7 @@ builds:
       - darwin
     goarch:
       - amd64
+      - arm64
     ldflags:
       - -X github.com/DataDog/chaos-controller/cli/chaosli/cmd.Version={{ .Tag }}
 
@@ -54,6 +58,7 @@ dockers_v2:
     dockerfile: bin/manager/Dockerfile
     platforms:
       - linux/amd64
+      - linux/arm64
     build_args:
       BUILDGOVERSION: "{{ .Env.BUILDGOVERSION }}"
       BUILDSTAMP: "{{ .Date }}"
@@ -69,6 +74,7 @@ dockers_v2:
     dockerfile: bin/injector/Dockerfile
     platforms:
       - linux/amd64
+      - linux/arm64
     build_args:
       BUILDGOVERSION: "{{ .Env.BUILDGOVERSION }}"
       BUILDSTAMP: "{{ .Date }}"
@@ -87,6 +93,7 @@ dockers_v2:
     dockerfile: bin/handler/Dockerfile
     platforms:
       - linux/amd64
+      - linux/arm64
     build_args:
       BUILDGOVERSION: "{{ .Env.BUILDGOVERSION }}"
       BUILDSTAMP: "{{ .Date }}"
