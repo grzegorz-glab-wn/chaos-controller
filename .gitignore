@@ -56,3 +56,7 @@ ebpf/builds/
 
 # DS_Store
 .DS_Store
+
+# Helm chart packages
+*.tgz
+chaos-controller-*.tgz

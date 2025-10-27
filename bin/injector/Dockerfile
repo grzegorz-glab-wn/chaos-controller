@@ -22,13 +22,13 @@ RUN apt-get update && \
 
 FROM gcr.io/distroless/python3-debian12:latest
 
-ARG TARGETARCH
+ARG TARGETPLATFORM
 
 # binaries used by the chaos-injector, ran as commmands
 COPY --from=binaries /usr/bin/uname /usr/bin/df /usr/bin/ls /usr/bin/test /usr/bin/
 COPY --from=binaries /usr/sbin/iptables /usr/sbin/
 COPY --from=binaries /usr/sbin/tc /sbin/tc
-COPY --from=binaries /usr/bin/bpftool-${TARGETARCH} /usr/bin/bpftool
+COPY --from=binaries /usr/bin/bpftool-amd64 /usr/bin/bpftool
 
 # libraries used by above mentioned binaries (mostly GLIBC related)
 COPY --from=binaries /lib/ld-linux-aarch64.so.[1]  /lib/
@@ -41,11 +41,11 @@ COPY --from=binaries /usr/lib/x86_64-linux-gn[u] /usr/lib/x86_64-linux-gnu/
 # no more sh
 COPY --from=binaries /usr/bin/test /bin/sh
 
-COPY injector_${TARGETARCH} /usr/local/bin/chaos-injector
-COPY injector_${TARGETARCH} /usr/local/bin/injector
+COPY $TARGETPLATFORM/injector /usr/local/bin/chaos-injector
+COPY $TARGETPLATFORM/injector /usr/local/bin/injector
 
-COPY dns_disruption_resolver.py /usr/local/bin/dns_disruption_resolver.py
-COPY ebpf/${TARGETARCH}/ /usr/local/bin/
+COPY bin/injector/dns_disruption_resolver.py /usr/local/bin/dns_disruption_resolver.py
+COPY ebpf/includes/amd64/ /usr/local/bin/
 
 ENTRYPOINT ["/usr/local/bin/chaos-injector"]
 
