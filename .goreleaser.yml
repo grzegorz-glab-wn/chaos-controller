@@ -3,7 +3,6 @@ version: 2
 before:
   hooks:
     - go mod download
-    - make docker-build-ebpf  # Ensure eBPF builds for injector
 
 builds:
   - id: controller
