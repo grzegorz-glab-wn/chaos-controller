@@ -1,7 +1,7 @@
 FROM scratch AS handler
 
-ARG TARGETARCH
-COPY linux/${TARGETARCH}/handler /usr/local/bin/handler
+ARG TARGETPLATFORM
+COPY $TARGETPLATFORM/handler /usr/local/bin/handler
 
 ENTRYPOINT ["/usr/local/bin/handler"]
 

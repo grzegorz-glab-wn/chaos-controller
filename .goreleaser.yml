@@ -74,6 +74,9 @@ dockers_v2:
       BUILDSTAMP: "{{ .Date }}"
     ids:
       - injector
+    extra_files:
+      - bin/injector/dns_disruption_resolver.py
+      - ebpf
 
   - id: handler
     images:
