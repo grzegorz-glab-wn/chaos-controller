@@ -221,19 +221,20 @@ func main() {
 
 	// create disruption reconciler
 	disruptionReconciler := &controllers.DisruptionReconciler{
-		Client:                     mgr.GetClient(),
-		BaseLog:                    logger,
-		Scheme:                     mgr.GetScheme(),
-		Recorder:                   broadcaster.NewRecorder(mgr.GetScheme(), corev1.EventSource{Component: chaosv1beta1.SourceDisruptionComponent}),
-		MetricsSink:                metricsSink,
-		TracerSink:                 tracerSink,
-		TargetSelector:             targetSelector,
-		ExpiredDisruptionGCDelay:   gcPtr,
-		ChaosPodService:            chaosPodService,
-		CloudService:               cloudProviderManager,
-		DisruptionsDeletionTimeout: cfg.Controller.DisruptionDeletionTimeout,
-		DeleteOnly:                 cfg.Controller.DeleteOnly,
-		FinalizerDeletionDelay:     cfg.Controller.FinalizerDeletionDelay,
+		Client:                        mgr.GetClient(),
+		BaseLog:                       logger,
+		Scheme:                        mgr.GetScheme(),
+		Recorder:                      broadcaster.NewRecorder(mgr.GetScheme(), corev1.EventSource{Component: chaosv1beta1.SourceDisruptionComponent}),
+		MetricsSink:                   metricsSink,
+		TracerSink:                    tracerSink,
+		TargetSelector:                targetSelector,
+		ExpiredDisruptionGCDelay:      gcPtr,
+		ChaosPodService:               chaosPodService,
+		CloudService:                  cloudProviderManager,
+		DisruptionsDeletionTimeout:    cfg.Controller.DisruptionDeletionTimeout,
+		DeleteOnly:                    cfg.Controller.DeleteOnly,
+		FinalizerDeletionDelay:        cfg.Controller.FinalizerDeletionDelay,
+		ConcurrentInjectorPodCreation: cfg.Controller.ConcurrentInjectorPodCreation,
 	}
 
 	informerClient := kubernetes.NewForConfigOrDie(ctrl.GetConfigOrDie())

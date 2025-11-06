@@ -22,6 +22,7 @@ import (
 	"math/rand"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -74,9 +75,10 @@ type DisruptionReconciler struct {
 	DisruptionsWatchersManager watchers.DisruptionsWatchersManager
 	ChaosPodService            services.ChaosPodService
 	CloudService               cloudservice.CloudServicesProvidersManager
-	DisruptionsDeletionTimeout time.Duration
-	DeleteOnly                 bool
-	FinalizerDeletionDelay     time.Duration
+	DisruptionsDeletionTimeout    time.Duration
+	DeleteOnly                    bool
+	FinalizerDeletionDelay        time.Duration
+	ConcurrentInjectorPodCreation int
 }
 
 const TargetsCountLogLimit = 50
@@ -496,7 +498,9 @@ func (r *DisruptionReconciler) updateInjectionStatus(ctx context.Context, instan
 // startInjection creates non-existing chaos pod for the given disruption
 func (r *DisruptionReconciler) startInjection(ctx context.Context, instance *chaosv1beta1.Disruption) error {
 	// chaosPodsMap is used to check if a target's chaos pods already exist or not
+	// Use sync.RWMutex to make it thread-safe for concurrent reads
 	chaosPodsMap := make(map[string]map[string]bool, len(instance.Status.TargetInjections))
+	var chaosPodsMapMu sync.RWMutex
 
 	chaosPods, err := r.ChaosPodService.GetChaosPodsOfDisruption(ctx, instance, nil)
 	if err != nil {
@@ -512,7 +516,9 @@ func (r *DisruptionReconciler) startInjection(ctx context.Context, instance *cha
 		if !instance.Status.HasTarget(chaosPod.Labels[chaostypes.TargetLabel]) {
 			r.deleteChaosPod(ctx, instance, chaosPod)
 		} else {
+			chaosPodsMapMu.Lock()
 			chaosPodsMap[chaosPod.Labels[chaostypes.TargetLabel]][chaosPod.Labels[chaostypes.DisruptionKindLabel]] = true
+			chaosPodsMapMu.Unlock()
 		}
 	}
 
@@ -529,36 +535,31 @@ func (r *DisruptionReconciler) startInjection(ctx context.Context, instance *cha
 	}
 
 	// iterate through target + existing disruption kind -- to ensure all chaos pods exist
+	// Process all targets concurrently with the same limit as pod creation
+	maxConcurrentTargets := r.ConcurrentInjectorPodCreation
+	if maxConcurrentTargets <= 0 {
+		maxConcurrentTargets = 30 // Default fallback
+	}
+
+	r.log.Infow("target injection concurrency", "limit", maxConcurrentTargets, "totalTargets", len(instance.Status.TargetInjections))
+	concurrencyLimit := make(chan struct{}, maxConcurrentTargets)
+	errorChan := make(chan error, len(instance.Status.TargetInjections))
+
+	// Start goroutines for each target
 	for targetName, injections := range instance.Status.TargetInjections {
-		for _, disKind := range chaostypes.DisruptionKindNames {
-			if subspec := instance.Spec.DisruptionKindPicker(disKind); reflect.ValueOf(subspec).IsNil() {
-				continue
-			}
+		concurrencyLimit <- struct{}{} // Acquire slot
+		go func(tName string, inj chaosv1beta1.TargetInjectorMap) {
+			defer func() { <-concurrencyLimit }() // Release slot when done
 
-			if _, ok := chaosPodsMap[targetName][disKind.String()]; ok {
-				continue
-			}
+			err := r.processTargetForInjection(ctx, instance, tName, inj, chaosPodsMap, &chaosPodsMapMu)
+			errorChan <- err // Send error (or nil)
+		}(targetName, injections)
+	}
 
-			injection := injections.GetInjectionWithDisruptionKind(disKind)
-
-			if injection == nil {
-				return fmt.Errorf("the injection status from the target injections with this %s kind of disruption does not exist", disKind)
-			}
-
-			if chaosv1beta1.ShouldSkipNodeFailureInjection(disKind, instance, *injection) {
-				r.log.Debugw("skipping over injection, seems to be a re-injected node failure", "targetName", targetName, "injectionStatus", injections)
-				continue
-			}
-
-			if err = r.createChaosPods(ctx, instance, targetName); err != nil {
-				if !apierrors.IsNotFound(err) {
-					return fmt.Errorf("error creating chaos pods: %w", err)
-				}
-
-				r.log.Warnw("could not create chaos pod", "error", err)
-			}
-
-			break
+	// Collect all results
+	for i := 0; i < len(instance.Status.TargetInjections); i++ {
+		if err := <-errorChan; err != nil {
+			return err
 		}
 	}
 
@@ -634,7 +635,11 @@ func (r *DisruptionReconciler) createChaosPods(ctx context.Context, instance *ch
 		err     error
 	}
 
-	const maxConcurrentPods = 30
+	maxConcurrentPods := r.ConcurrentInjectorPodCreation
+	if maxConcurrentPods <= 0 {
+		maxConcurrentPods = 30 // Default fallback
+	}
+	r.log.Infow("chaos pod creation concurrency", "limit", maxConcurrentPods, "totalPods", len(targetChaosPods))
 	concurrencyLimit := make(chan struct{}, maxConcurrentPods)
 	resultChan := make(chan podResult, len(targetChaosPods))
 
@@ -725,6 +730,47 @@ func (r *DisruptionReconciler) processTargetChaosPod(ctx context.Context, instan
 		r.log.Errorw("multiple injection pods for one target found", "target", target, "chaosPods", strings.Join(chaosPodNames, ","), "chaosPodLabels", targetChaosPod.Labels)
 		return false, nil // No new pod created
 	}
+}
+
+// processTargetForInjection processes a single target for chaos injection, checking all disruption kinds
+// and creating necessary chaos pods. Returns an error if any critical failure occurs.
+func (r *DisruptionReconciler) processTargetForInjection(ctx context.Context, instance *chaosv1beta1.Disruption, targetName string, injections chaosv1beta1.TargetInjectorMap, chaosPodsMap map[string]map[string]bool, chaosPodsMapMu *sync.RWMutex) error {
+	for _, disKind := range chaostypes.DisruptionKindNames {
+		if subspec := instance.Spec.DisruptionKindPicker(disKind); reflect.ValueOf(subspec).IsNil() {
+			continue
+		}
+
+		chaosPodsMapMu.RLock()
+		_, podExists := chaosPodsMap[targetName][disKind.String()]
+		chaosPodsMapMu.RUnlock()
+
+		if podExists {
+			continue
+		}
+
+		injection := injections.GetInjectionWithDisruptionKind(disKind)
+
+		if injection == nil {
+			return fmt.Errorf("the injection status from the target injections with this %s kind of disruption does not exist", disKind)
+		}
+
+		if chaosv1beta1.ShouldSkipNodeFailureInjection(disKind, instance, *injection) {
+			r.log.Debugw("skipping over injection, seems to be a re-injected node failure", "targetName", targetName, "injectionStatus", injections)
+			continue
+		}
+
+		if err := r.createChaosPods(ctx, instance, targetName); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return fmt.Errorf("error creating chaos pods: %w", err)
+			}
+
+			r.log.Warnw("could not create chaos pod", "error", err)
+		}
+
+		break
+	}
+
+	return nil
 }
 
 // cleanDisruption triggers the cleanup of the given instance
