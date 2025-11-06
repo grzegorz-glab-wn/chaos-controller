@@ -52,6 +52,7 @@ spec:
             {{- end }}
             - --client-go-qps={{ .Values.controller.clientGoQPS }}
             - --client-go-burst={{ .Values.controller.clientGoBurst }}
+            - --concurrent-injector-pod-creation={{ .Values.controller.concurrentInjectorPodCreation }}
             {{- with .Values.controller.additionalArgs }}
             {{- range . }}
             - {{ . | quote }}

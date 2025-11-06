@@ -22,6 +22,7 @@ import (
 	"math/rand"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -74,9 +75,13 @@ type DisruptionReconciler struct {
 	DisruptionsWatchersManager watchers.DisruptionsWatchersManager
 	ChaosPodService            services.ChaosPodService
 	CloudService               cloudservice.CloudServicesProvidersManager
-	DisruptionsDeletionTimeout time.Duration
-	DeleteOnly                 bool
-	FinalizerDeletionDelay     time.Duration
+	DisruptionsDeletionTimeout    time.Duration
+	DeleteOnly                    bool
+	FinalizerDeletionDelay        time.Duration
+	ConcurrentInjectorPodCreation int
+
+	// Mutex to protect concurrent access to instance modifications
+	instanceMutex sync.Mutex
 }
 
 const TargetsCountLogLimit = 50
@@ -134,6 +139,19 @@ func (r *DisruptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// Save original status for comparison to detect changes
+	originalStatus := instance.Status.DeepCopy()
+
+	// Defer single status update at the end of reconcile if status changed
+	defer func() {
+		// Only update status if there were no errors and status actually changed
+		if err == nil && !reflect.DeepEqual(&instance.Status, originalStatus) {
+			if updateErr := r.Client.Status().Update(ctx, instance); updateErr != nil {
+				err = fmt.Errorf("failed to update status: %w", updateErr)
+			}
+		}
+	}()
+
 	if err := r.DisruptionsWatchersManager.RemoveAllOrphanWatchers(); err != nil {
 		r.log.Errorw("error during the deletion of orphan watchers", "error", err)
 	}
@@ -183,11 +201,6 @@ func (r *DisruptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				instance.Status.IsStuckOnRemoval = true
 
 				r.log.Infow("instance seems stuck on removal, the deletion time expired, please check manually")
-
-				// Update the status of the 'instance' to reflect that it's stuck on removal.
-				if err := r.Client.Status().Update(ctx, instance); err != nil {
-					return ctrl.Result{}, fmt.Errorf("error marking the disruption stuck on removal: %w", err)
-				}
 
 				r.recordEventOnDisruption(instance, chaosv1beta1.EventDisruptionStuckOnRemoval, "", "")
 			}
@@ -244,10 +257,6 @@ func (r *DisruptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				// set cleanedAt
 				now := metav1.Now()
 				instance.Status.CleanedAt = &now
-
-				if err := r.Client.Status().Update(ctx, instance); err != nil {
-					return ctrl.Result{}, fmt.Errorf("error updating disruption's status: %w", err)
-				}
 
 				r.recordEventOnDisruption(instance, chaosv1beta1.EventDisruptionCleaned, "", "")
 
@@ -452,7 +461,7 @@ func (r *DisruptionReconciler) updateInjectionStatus(ctx context.Context, instan
 						podReady = true
 						readyPodsCount++
 
-						r.updateTargetInjectionStatus(instance, chaosPod, chaostypes.DisruptionTargetInjectionStatusInjected, cond.LastTransitionTime)
+						r.safeUpdateTargetInjectionStatus(instance, chaosPod, chaostypes.DisruptionTargetInjectionStatusInjected, cond.LastTransitionTime)
 
 						break
 					}
@@ -486,16 +495,13 @@ func (r *DisruptionReconciler) updateInjectionStatus(ctx context.Context, instan
 		instance.Status.InjectedTargetsCount = int(math.Floor(float64(readyPodsCount) / float64(instance.Spec.DisruptionCount())))
 	}
 
-	if err := r.Client.Status().Update(ctx, instance); err != nil {
-		return fmt.Errorf("unable to update disruption injection status: %w", err)
-	}
-
 	return nil
 }
 
 // startInjection creates non-existing chaos pod for the given disruption
 func (r *DisruptionReconciler) startInjection(ctx context.Context, instance *chaosv1beta1.Disruption) error {
 	// chaosPodsMap is used to check if a target's chaos pods already exist or not
+	// No mutex needed since each target accesses its own map key
 	chaosPodsMap := make(map[string]map[string]bool, len(instance.Status.TargetInjections))
 
 	chaosPods, err := r.ChaosPodService.GetChaosPodsOfDisruption(ctx, instance, nil)
@@ -529,36 +535,31 @@ func (r *DisruptionReconciler) startInjection(ctx context.Context, instance *cha
 	}
 
 	// iterate through target + existing disruption kind -- to ensure all chaos pods exist
+	// Process all targets concurrently with the same limit as pod creation
+	maxConcurrentTargets := r.ConcurrentInjectorPodCreation
+	if maxConcurrentTargets <= 0 {
+		maxConcurrentTargets = 30 // Default fallback
+	}
+
+	r.log.Infow("target injection concurrency", "limit", maxConcurrentTargets, "totalTargets", len(instance.Status.TargetInjections))
+	concurrencyLimit := make(chan struct{}, maxConcurrentTargets)
+	errorChan := make(chan error, len(instance.Status.TargetInjections))
+
+	// Start goroutines for each target
 	for targetName, injections := range instance.Status.TargetInjections {
-		for _, disKind := range chaostypes.DisruptionKindNames {
-			if subspec := instance.Spec.DisruptionKindPicker(disKind); reflect.ValueOf(subspec).IsNil() {
-				continue
-			}
+		concurrencyLimit <- struct{}{} // Acquire slot
+		go func(tName string, inj chaosv1beta1.TargetInjectorMap) {
+			defer func() { <-concurrencyLimit }() // Release slot when done
 
-			if _, ok := chaosPodsMap[targetName][disKind.String()]; ok {
-				continue
-			}
+			err := r.processTargetForInjection(ctx, instance, tName, inj, chaosPodsMap)
+			errorChan <- err // Send error (or nil)
+		}(targetName, injections)
+	}
 
-			injection := injections.GetInjectionWithDisruptionKind(disKind)
-
-			if injection == nil {
-				return fmt.Errorf("the injection status from the target injections with this %s kind of disruption does not exist", disKind)
-			}
-
-			if chaosv1beta1.ShouldSkipNodeFailureInjection(disKind, instance, *injection) {
-				r.log.Debugw("skipping over injection, seems to be a re-injected node failure", "targetName", targetName, "injectionStatus", injections)
-				continue
-			}
-
-			if err = r.createChaosPods(ctx, instance, targetName); err != nil {
-				if !apierrors.IsNotFound(err) {
-					return fmt.Errorf("error creating chaos pods: %w", err)
-				}
-
-				r.log.Warnw("could not create chaos pod", "error", err)
-			}
-
-			break
+	// Collect all results
+	for i := 0; i < len(instance.Status.TargetInjections); i++ {
+		if err := <-errorChan; err != nil {
+			return err
 		}
 	}
 
@@ -625,65 +626,109 @@ func (r *DisruptionReconciler) createChaosPods(ctx context.Context, instance *ch
 		return nil
 	}
 
-	// create injection pods
+	// create injection pods sequentially (usually just 1 pod per target)
 	newPodsCreated := false
 
+	// Process all chaos pods sequentially - much simpler since typically 1 pod per target
 	for _, targetChaosPod := range targetChaosPods {
-		// check if an injection pod already exists for the given (instance, namespace, disruption kind) tuple
-		found, err := r.ChaosPodService.GetChaosPodsOfDisruption(ctx, instance, targetChaosPod.Labels)
+		created, err := r.processTargetChaosPod(ctx, instance, target, targetChaosPod)
 		if err != nil {
-			return fmt.Errorf("error getting existing chaos pods: %w", err)
+			return err
 		}
-
-		// create injection pods if none have been found
-		switch len(found) {
-		case 0:
-			chaosPodArgs := r.ChaosPodService.GetPodInjectorArgs(targetChaosPod)
-			r.log.Infow("creating chaos pod", "target", target, "chaosPodArgs", chaosPodArgs)
-
-			// create the pod
-			if err = r.ChaosPodService.CreatePod(ctx, &targetChaosPod); err != nil {
-				r.recordEventOnDisruption(instance, chaosv1beta1.EventDisruptionCreationFailed, instance.Name, target)
-				r.handleMetricSinkError(r.MetricsSink.MetricPodsCreated(target, instance.Name, instance.Namespace, false))
-
-				return fmt.Errorf("error creating chaos pod: %w", err)
-			}
-
-			// wait for the pod to be existing
-			if err := r.ChaosPodService.WaitForPodCreation(ctx, targetChaosPod); err != nil {
-				r.log.Errorw("error waiting for chaos pod to be created", "error", err, "chaosPod", targetChaosPod.Name, "target", target)
-
-				continue
-			}
-
-			// send metrics and events
-			r.recordEventOnDisruption(instance, chaosv1beta1.EventDisruptionChaosPodCreated, instance.Name, target)
-			r.recordEventOnTarget(ctx, instance, target, chaosv1beta1.EventDisrupted, targetChaosPod.Name, instance.Name)
-			r.handleMetricSinkError(r.MetricsSink.MetricPodsCreated(target, instance.Name, instance.Namespace, true))
-
-			// mark that we created new pods in this cycle
+		if created {
 			newPodsCreated = true
-		case 1:
-			r.log.Debugw("an injection pod is already existing for the selected target", "target", target, "chaosPod", found[0].Name)
-		default:
-			var chaosPodNames []string
-			for _, pod := range found {
-				chaosPodNames = append(chaosPodNames, pod.Name)
-			}
-
-			r.log.Errorw("multiple injection pods for one target found", "target", target, "chaosPods", strings.Join(chaosPodNames, ","), "chaosPodLabels", targetChaosPod.Labels)
 		}
 	}
 
-	// Increment run count if we created new pods in this cycle
-	if newPodsCreated {
-		instance.Status.RunCount++
-		r.log.Infow("incremented disruption run count", "runCount", instance.Status.RunCount, "disruptionName", instance.Name)
+	// All pods processed successfully
 
-		// Update the status in the cluster
-		if err := r.Client.Status().Update(ctx, instance); err != nil {
-			return fmt.Errorf("error updating disruption status with run count: %w", err)
+	// Increment run count if we created new pods in this cycle (now thread-safe)
+	if newPodsCreated {
+		r.safeIncrementRunCount(instance)
+	}
+
+	return nil
+}
+
+// processTargetChaosPod handles the processing of a single target chaos pod, including checking for existing pods
+// and creating new ones if needed. Returns true if a new pod was created, false otherwise.
+func (r *DisruptionReconciler) processTargetChaosPod(ctx context.Context, instance *chaosv1beta1.Disruption, target string, targetChaosPod corev1.Pod) (bool, error) {
+	// check if an injection pod already exists for the given (instance, namespace, disruption kind) tuple
+	found, err := r.ChaosPodService.GetChaosPodsOfDisruption(ctx, instance, targetChaosPod.Labels)
+	if err != nil {
+		return false, fmt.Errorf("error getting existing chaos pods: %w", err)
+	}
+
+	// create injection pods if none have been found
+	switch len(found) {
+	case 0:
+		chaosPodArgs := r.ChaosPodService.GetPodInjectorArgs(targetChaosPod)
+		r.log.Infow("creating chaos pod", "target", target, "chaosPodArgs", chaosPodArgs)
+
+		// create the pod
+		if err = r.ChaosPodService.CreatePod(ctx, &targetChaosPod); err != nil {
+			r.recordEventOnDisruption(instance, chaosv1beta1.EventDisruptionCreationFailed, instance.Name, target)
+			r.handleMetricSinkError(r.MetricsSink.MetricPodsCreated(target, instance.Name, instance.Namespace, false))
+			return false, fmt.Errorf("error creating chaos pod: %w", err)
 		}
+
+		// wait for the pod to be existing
+		if err := r.ChaosPodService.WaitForPodCreation(ctx, targetChaosPod); err != nil {
+			r.log.Errorw("error waiting for chaos pod to be created", "error", err, "chaosPod", targetChaosPod.Name, "target", target)
+			return false, nil // Continue processing other pods
+		}
+
+		// send metrics and events
+		r.recordEventOnDisruption(instance, chaosv1beta1.EventDisruptionChaosPodCreated, instance.Name, target)
+		r.recordEventOnTarget(ctx, instance, target, chaosv1beta1.EventDisrupted, targetChaosPod.Name, instance.Name)
+		r.handleMetricSinkError(r.MetricsSink.MetricPodsCreated(target, instance.Name, instance.Namespace, true))
+
+		return true, nil // New pod was created
+	case 1:
+		r.log.Debugw("an injection pod is already existing for the selected target", "target", target, "chaosPod", found[0].Name)
+		return false, nil // No new pod created
+	default:
+		var chaosPodNames []string
+		for _, pod := range found {
+			chaosPodNames = append(chaosPodNames, pod.Name)
+		}
+		r.log.Errorw("multiple injection pods for one target found", "target", target, "chaosPods", strings.Join(chaosPodNames, ","), "chaosPodLabels", targetChaosPod.Labels)
+		return false, nil // No new pod created
+	}
+}
+
+// processTargetForInjection processes a single target for chaos injection, checking all disruption kinds
+// and creating necessary chaos pods. Returns an error if any critical failure occurs.
+func (r *DisruptionReconciler) processTargetForInjection(ctx context.Context, instance *chaosv1beta1.Disruption, targetName string, injections chaosv1beta1.TargetInjectorMap, chaosPodsMap map[string]map[string]bool) error {
+	for _, disKind := range chaostypes.DisruptionKindNames {
+		if subspec := instance.Spec.DisruptionKindPicker(disKind); reflect.ValueOf(subspec).IsNil() {
+			continue
+		}
+
+		if _, podExists := chaosPodsMap[targetName][disKind.String()]; podExists {
+			continue
+		}
+
+		injection := injections.GetInjectionWithDisruptionKind(disKind)
+
+		if injection == nil {
+			return fmt.Errorf("the injection status from the target injections with this %s kind of disruption does not exist", disKind)
+		}
+
+		if chaosv1beta1.ShouldSkipNodeFailureInjection(disKind, instance, *injection) {
+			r.log.Debugw("skipping over injection, seems to be a re-injected node failure", "targetName", targetName, "injectionStatus", injections)
+			continue
+		}
+
+		if err := r.createChaosPods(ctx, instance, targetName); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return fmt.Errorf("error creating chaos pods: %w", err)
+			}
+
+			r.log.Warnw("could not create chaos pod", "error", err)
+		}
+
+		break
 	}
 
 	return nil
@@ -741,7 +786,7 @@ func (r *DisruptionReconciler) handleChaosPodsTermination(ctx context.Context, i
 		r.handleChaosPodTermination(ctx, instance, chaosPod)
 	}
 
-	return r.Client.Status().Update(ctx, instance)
+	return nil
 }
 
 func (r *DisruptionReconciler) handleChaosPodTermination(ctx context.Context, instance *chaosv1beta1.Disruption, chaosPod corev1.Pod) {
@@ -771,11 +816,24 @@ func (r *DisruptionReconciler) handleChaosPodTermination(ctx context.Context, in
 
 		instance.Status.IsStuckOnRemoval = true
 
-		r.updateTargetInjectionStatus(instance, chaosPod, chaostypes.DisruptionTargetInjectionStatusStatusIsStuckOnRemoval, *chaosPod.DeletionTimestamp)
+		r.safeUpdateTargetInjectionStatus(instance, chaosPod, chaostypes.DisruptionTargetInjectionStatusStatusIsStuckOnRemoval, *chaosPod.DeletionTimestamp)
 	}
 }
 
-func (r *DisruptionReconciler) updateTargetInjectionStatus(instance *chaosv1beta1.Disruption, chaosPod corev1.Pod, status chaostypes.DisruptionTargetInjectionStatus, since metav1.Time) {
+// safeIncrementRunCount safely increments the RunCount with mutex protection
+func (r *DisruptionReconciler) safeIncrementRunCount(instance *chaosv1beta1.Disruption) {
+	r.instanceMutex.Lock()
+	defer r.instanceMutex.Unlock()
+
+	instance.Status.RunCount++
+	r.log.Infow("incremented disruption run count", "runCount", instance.Status.RunCount, "disruptionName", instance.Name)
+}
+
+// safeUpdateTargetInjectionStatus safely updates target injection status with mutex protection
+func (r *DisruptionReconciler) safeUpdateTargetInjectionStatus(instance *chaosv1beta1.Disruption, chaosPod corev1.Pod, status chaostypes.DisruptionTargetInjectionStatus, since metav1.Time) {
+	r.instanceMutex.Lock()
+	defer r.instanceMutex.Unlock()
+
 	if instance.Status.TargetInjections == nil {
 		instance.Status.TargetInjections = make(chaosv1beta1.TargetInjections)
 	}
@@ -864,7 +922,7 @@ func (r *DisruptionReconciler) selectTargets(ctx context.Context, instance *chao
 	instance.Status.SelectedTargetsCount = len(instance.Status.TargetInjections)
 	instance.Status.IgnoredTargetsCount = totalAvailableTargetsCount - targetsCount
 
-	return r.Client.Status().Update(ctx, instance)
+	return nil
 }
 
 // getMatchingTargets fetches all existing target fitting the disruption's selector
