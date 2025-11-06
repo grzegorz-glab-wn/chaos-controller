@@ -74,9 +74,10 @@ type DisruptionReconciler struct {
 	DisruptionsWatchersManager watchers.DisruptionsWatchersManager
 	ChaosPodService            services.ChaosPodService
 	CloudService               cloudservice.CloudServicesProvidersManager
-	DisruptionsDeletionTimeout time.Duration
-	DeleteOnly                 bool
-	FinalizerDeletionDelay     time.Duration
+	DisruptionsDeletionTimeout    time.Duration
+	DeleteOnly                    bool
+	FinalizerDeletionDelay        time.Duration
+	ConcurrentInjectorPodCreation int
 }
 
 const TargetsCountLogLimit = 50
@@ -634,7 +635,11 @@ func (r *DisruptionReconciler) createChaosPods(ctx context.Context, instance *ch
 		err     error
 	}
 
-	const maxConcurrentPods = 30
+	maxConcurrentPods := r.ConcurrentInjectorPodCreation
+	if maxConcurrentPods <= 0 {
+		maxConcurrentPods = 30 // Default fallback
+	}
+	r.log.Infow("chaos pod creation concurrency", "limit", maxConcurrentPods, "totalPods", len(targetChaosPods))
 	concurrencyLimit := make(chan struct{}, maxConcurrentPods)
 	resultChan := make(chan podResult, len(targetChaosPods))
 
