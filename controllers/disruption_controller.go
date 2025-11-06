@@ -629,49 +629,12 @@ func (r *DisruptionReconciler) createChaosPods(ctx context.Context, instance *ch
 	newPodsCreated := false
 
 	for _, targetChaosPod := range targetChaosPods {
-		// check if an injection pod already exists for the given (instance, namespace, disruption kind) tuple
-		found, err := r.ChaosPodService.GetChaosPodsOfDisruption(ctx, instance, targetChaosPod.Labels)
+		podCreated, err := r.processTargetChaosPod(ctx, instance, target, targetChaosPod)
 		if err != nil {
-			return fmt.Errorf("error getting existing chaos pods: %w", err)
+			return err
 		}
-
-		// create injection pods if none have been found
-		switch len(found) {
-		case 0:
-			chaosPodArgs := r.ChaosPodService.GetPodInjectorArgs(targetChaosPod)
-			r.log.Infow("creating chaos pod", "target", target, "chaosPodArgs", chaosPodArgs)
-
-			// create the pod
-			if err = r.ChaosPodService.CreatePod(ctx, &targetChaosPod); err != nil {
-				r.recordEventOnDisruption(instance, chaosv1beta1.EventDisruptionCreationFailed, instance.Name, target)
-				r.handleMetricSinkError(r.MetricsSink.MetricPodsCreated(target, instance.Name, instance.Namespace, false))
-
-				return fmt.Errorf("error creating chaos pod: %w", err)
-			}
-
-			// wait for the pod to be existing
-			if err := r.ChaosPodService.WaitForPodCreation(ctx, targetChaosPod); err != nil {
-				r.log.Errorw("error waiting for chaos pod to be created", "error", err, "chaosPod", targetChaosPod.Name, "target", target)
-
-				continue
-			}
-
-			// send metrics and events
-			r.recordEventOnDisruption(instance, chaosv1beta1.EventDisruptionChaosPodCreated, instance.Name, target)
-			r.recordEventOnTarget(ctx, instance, target, chaosv1beta1.EventDisrupted, targetChaosPod.Name, instance.Name)
-			r.handleMetricSinkError(r.MetricsSink.MetricPodsCreated(target, instance.Name, instance.Namespace, true))
-
-			// mark that we created new pods in this cycle
+		if podCreated {
 			newPodsCreated = true
-		case 1:
-			r.log.Debugw("an injection pod is already existing for the selected target", "target", target, "chaosPod", found[0].Name)
-		default:
-			var chaosPodNames []string
-			for _, pod := range found {
-				chaosPodNames = append(chaosPodNames, pod.Name)
-			}
-
-			r.log.Errorw("multiple injection pods for one target found", "target", target, "chaosPods", strings.Join(chaosPodNames, ","), "chaosPodLabels", targetChaosPod.Labels)
 		}
 	}
 
@@ -687,6 +650,53 @@ func (r *DisruptionReconciler) createChaosPods(ctx context.Context, instance *ch
 	}
 
 	return nil
+}
+
+// processTargetChaosPod handles the processing of a single target chaos pod, including checking for existing pods
+// and creating new ones if needed. Returns true if a new pod was created, false otherwise.
+func (r *DisruptionReconciler) processTargetChaosPod(ctx context.Context, instance *chaosv1beta1.Disruption, target string, targetChaosPod corev1.Pod) (bool, error) {
+	// check if an injection pod already exists for the given (instance, namespace, disruption kind) tuple
+	found, err := r.ChaosPodService.GetChaosPodsOfDisruption(ctx, instance, targetChaosPod.Labels)
+	if err != nil {
+		return false, fmt.Errorf("error getting existing chaos pods: %w", err)
+	}
+
+	// create injection pods if none have been found
+	switch len(found) {
+	case 0:
+		chaosPodArgs := r.ChaosPodService.GetPodInjectorArgs(targetChaosPod)
+		r.log.Infow("creating chaos pod", "target", target, "chaosPodArgs", chaosPodArgs)
+
+		// create the pod
+		if err = r.ChaosPodService.CreatePod(ctx, &targetChaosPod); err != nil {
+			r.recordEventOnDisruption(instance, chaosv1beta1.EventDisruptionCreationFailed, instance.Name, target)
+			r.handleMetricSinkError(r.MetricsSink.MetricPodsCreated(target, instance.Name, instance.Namespace, false))
+			return false, fmt.Errorf("error creating chaos pod: %w", err)
+		}
+
+		// wait for the pod to be existing
+		if err := r.ChaosPodService.WaitForPodCreation(ctx, targetChaosPod); err != nil {
+			r.log.Errorw("error waiting for chaos pod to be created", "error", err, "chaosPod", targetChaosPod.Name, "target", target)
+			return false, nil // Continue processing other pods
+		}
+
+		// send metrics and events
+		r.recordEventOnDisruption(instance, chaosv1beta1.EventDisruptionChaosPodCreated, instance.Name, target)
+		r.recordEventOnTarget(ctx, instance, target, chaosv1beta1.EventDisrupted, targetChaosPod.Name, instance.Name)
+		r.handleMetricSinkError(r.MetricsSink.MetricPodsCreated(target, instance.Name, instance.Namespace, true))
+
+		return true, nil // New pod was created
+	case 1:
+		r.log.Debugw("an injection pod is already existing for the selected target", "target", target, "chaosPod", found[0].Name)
+		return false, nil // No new pod created
+	default:
+		var chaosPodNames []string
+		for _, pod := range found {
+			chaosPodNames = append(chaosPodNames, pod.Name)
+		}
+		r.log.Errorw("multiple injection pods for one target found", "target", target, "chaosPods", strings.Join(chaosPodNames, ","), "chaosPodLabels", targetChaosPod.Labels)
+		return false, nil // No new pod created
+	}
 }
 
 // cleanDisruption triggers the cleanup of the given instance
