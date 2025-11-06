@@ -628,14 +628,42 @@ func (r *DisruptionReconciler) createChaosPods(ctx context.Context, instance *ch
 	// create injection pods
 	newPodsCreated := false
 
+	// Process all chaos pods concurrently with a limit of 30 concurrent goroutines
+	type podResult struct {
+		created bool
+		err     error
+	}
+
+	const maxConcurrentPods = 30
+	concurrencyLimit := make(chan struct{}, maxConcurrentPods)
+	resultChan := make(chan podResult, len(targetChaosPods))
+
+	// Start goroutines for each chaos pod
 	for _, targetChaosPod := range targetChaosPods {
-		podCreated, err := r.processTargetChaosPod(ctx, instance, target, targetChaosPod)
-		if err != nil {
-			return err
+		concurrencyLimit <- struct{}{} // Acquire slot (blocks if 30 already running)
+		go func(pod corev1.Pod) {
+			defer func() { <-concurrencyLimit }() // Release slot when done
+
+			created, err := r.processTargetChaosPod(ctx, instance, target, pod)
+			resultChan <- podResult{created: created, err: err}
+		}(targetChaosPod)
+	}
+
+	// Collect results from all goroutines
+	var errors []error
+	for i := 0; i < len(targetChaosPods); i++ {
+		result := <-resultChan
+		if result.err != nil {
+			errors = append(errors, result.err)
 		}
-		if podCreated {
+		if result.created {
 			newPodsCreated = true
 		}
+	}
+
+	// Return any errors that occurred
+	if len(errors) > 0 {
+		return fmt.Errorf("errors processing chaos pods: %v", errors)
 	}
 
 	// Increment run count if we created new pods in this cycle
