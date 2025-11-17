@@ -22,7 +22,6 @@ import (
 	"math/rand"
 	"reflect"
 	"strings"
-	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -62,26 +61,23 @@ import (
 
 // DisruptionReconciler reconciles a Disruption object
 type DisruptionReconciler struct {
-	Client                     client.Client
-	BaseLog                    *zap.SugaredLogger
-	Scheme                     *runtime.Scheme
-	Recorder                   record.EventRecorder
-	MetricsSink                metrics.Sink
-	TracerSink                 tracer.Sink
-	TargetSelector             targetselector.TargetSelector
-	log                        *zap.SugaredLogger
-	SafetyNets                 []safemode.Safemode
-	ExpiredDisruptionGCDelay   *time.Duration
-	DisruptionsWatchersManager watchers.DisruptionsWatchersManager
-	ChaosPodService            services.ChaosPodService
-	CloudService               cloudservice.CloudServicesProvidersManager
+	Client                        client.Client
+	BaseLog                       *zap.SugaredLogger
+	Scheme                        *runtime.Scheme
+	Recorder                      record.EventRecorder
+	MetricsSink                   metrics.Sink
+	TracerSink                    tracer.Sink
+	TargetSelector                targetselector.TargetSelector
+	log                           *zap.SugaredLogger
+	SafetyNets                    []safemode.Safemode
+	ExpiredDisruptionGCDelay      *time.Duration
+	DisruptionsWatchersManager    watchers.DisruptionsWatchersManager
+	ChaosPodService               services.ChaosPodService
+	CloudService                  cloudservice.CloudServicesProvidersManager
 	DisruptionsDeletionTimeout    time.Duration
 	DeleteOnly                    bool
 	FinalizerDeletionDelay        time.Duration
 	ConcurrentInjectorPodCreation int
-
-	// Mutex to protect concurrent access to instance modifications
-	instanceMutex sync.Mutex
 }
 
 const TargetsCountLogLimit = 50
@@ -139,19 +135,6 @@ func (r *DisruptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Save original status for comparison to detect changes
-	originalStatus := instance.Status.DeepCopy()
-
-	// Defer single status update at the end of reconcile if status changed
-	defer func() {
-		// Only update status if there were no errors and status actually changed
-		if err == nil && !reflect.DeepEqual(&instance.Status, originalStatus) {
-			if updateErr := r.Client.Status().Update(ctx, instance); updateErr != nil {
-				err = fmt.Errorf("failed to update status: %w", updateErr)
-			}
-		}
-	}()
-
 	if err := r.DisruptionsWatchersManager.RemoveAllOrphanWatchers(); err != nil {
 		r.log.Errorw("error during the deletion of orphan watchers", "error", err)
 	}
@@ -201,6 +184,11 @@ func (r *DisruptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				instance.Status.IsStuckOnRemoval = true
 
 				r.log.Infow("instance seems stuck on removal, the deletion time expired, please check manually")
+
+				// Update the status of the 'instance' to reflect that it's stuck on removal.
+				if err := r.updateStatus(ctx, instance); err != nil {
+					return ctrl.Result{}, fmt.Errorf("error marking the disruption stuck on removal: %w", err)
+				}
 
 				r.recordEventOnDisruption(instance, chaosv1beta1.EventDisruptionStuckOnRemoval, "", "")
 			}
@@ -262,6 +250,8 @@ func (r *DisruptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 				requeueAfter := r.FinalizerDeletionDelay
 				r.log.Infow(fmt.Sprintf("all chaos pods are cleaned up; requeuing to remove finalizer after %s", requeueAfter))
+
+				r.updateStatus(ctx, instance)
 
 				return ctrl.Result{Requeue: true, RequeueAfter: requeueAfter}, nil
 			}
@@ -367,6 +357,8 @@ func (r *DisruptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 			r.log.Infow("disruption is not fully injected yet, requeuing", "injectionStatus", instance.Status.InjectionStatus)
 
+			r.updateStatus(ctx, instance)
+
 			return ctrl.Result{
 				Requeue:      true,
 				RequeueAfter: requeueAfter,
@@ -385,7 +377,8 @@ func (r *DisruptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	// stop the reconcile loop, there's nothing else to do
-	return ctrl.Result{}, nil
+
+	return ctrl.Result{}, r.updateStatus(ctx, instance)
 }
 
 // updateInjectionStatus updates the given instance injection status depending on its chaos pods statuses
@@ -495,6 +488,8 @@ func (r *DisruptionReconciler) updateInjectionStatus(ctx context.Context, instan
 		instance.Status.InjectedTargetsCount = int(math.Floor(float64(readyPodsCount) / float64(instance.Spec.DisruptionCount())))
 	}
 
+	r.updateStatus(ctx, instance)
+
 	return nil
 }
 
@@ -515,7 +510,7 @@ func (r *DisruptionReconciler) startInjection(ctx context.Context, instance *cha
 	}
 
 	for _, chaosPod := range chaosPods {
-		if !instance.Status.HasTarget(chaosPod.Labels[chaostypes.TargetLabel]) {
+		if !instance.HasTarget(chaosPod.Labels[chaostypes.TargetLabel]) {
 			r.deleteChaosPod(ctx, instance, chaosPod)
 		} else {
 			chaosPodsMap[chaosPod.Labels[chaostypes.TargetLabel]][chaosPod.Labels[chaostypes.DisruptionKindLabel]] = true
@@ -541,29 +536,53 @@ func (r *DisruptionReconciler) startInjection(ctx context.Context, instance *cha
 		maxConcurrentTargets = 30 // Default fallback
 	}
 
-	r.log.Infow("target injection concurrency", "limit", maxConcurrentTargets, "totalTargets", len(instance.Status.TargetInjections))
-	concurrencyLimit := make(chan struct{}, maxConcurrentTargets)
-	errorChan := make(chan error, len(instance.Status.TargetInjections))
+	targets := r.snapshotTargets(instance)
 
-	// Start goroutines for each target
-	for targetName, injections := range instance.Status.TargetInjections {
-		concurrencyLimit <- struct{}{} // Acquire slot
+	r.log.Infow("target injection concurrency", "limit", maxConcurrentTargets, "totalTargets", len(targets))
+	concurrencyLimit := make(chan struct{}, maxConcurrentTargets)
+	errorChan := make(chan error, len(targets))
+
+	for _, target := range targets {
+		concurrencyLimit <- struct{}{}
 		go func(tName string, inj chaosv1beta1.TargetInjectorMap) {
-			defer func() { <-concurrencyLimit }() // Release slot when done
+			defer func() { <-concurrencyLimit }()
 
 			err := r.processTargetForInjection(ctx, instance, tName, inj, chaosPodsMap)
-			errorChan <- err // Send error (or nil)
-		}(targetName, injections)
+			errorChan <- err
+		}(target.name, target.injections)
 	}
 
 	// Collect all results
-	for i := 0; i < len(instance.Status.TargetInjections); i++ {
+	for i := 0; i < len(targets); i++ {
 		if err := <-errorChan; err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+type targetSnapshot struct {
+	name       string
+	injections chaosv1beta1.TargetInjectorMap
+}
+
+// snapshotTargets copies target injections to prevent concurrent map iteration race conditions.
+func (r *DisruptionReconciler) snapshotTargets(instance *chaosv1beta1.Disruption) []targetSnapshot {
+	targets := make([]targetSnapshot, 0, len(instance.Status.TargetInjections))
+
+	for targetName, injections := range instance.Status.TargetInjections {
+		injectionsCopy := make(chaosv1beta1.TargetInjectorMap, len(injections))
+		for k, v := range injections {
+			injectionsCopy[k] = v
+		}
+		targets = append(targets, targetSnapshot{
+			name:       targetName,
+			injections: injectionsCopy,
+		})
+	}
+
+	return targets
 }
 
 // createChaosPods attempts to create all the chaos pods for a given target. If a given chaos pod already exists, it is not recreated.
@@ -642,9 +661,10 @@ func (r *DisruptionReconciler) createChaosPods(ctx context.Context, instance *ch
 
 	// All pods processed successfully
 
-	// Increment run count if we created new pods in this cycle (now thread-safe)
+	// Increment run count if we created new pods in this cycle
 	if newPodsCreated {
-		r.safeIncrementRunCount(instance)
+		instance.Status.RunCount++
+		r.log.Infow("incremented disruption run count", "runCount", instance.Status.RunCount, "disruptionName", instance.Name)
 	}
 
 	return nil
@@ -786,7 +806,7 @@ func (r *DisruptionReconciler) handleChaosPodsTermination(ctx context.Context, i
 		r.handleChaosPodTermination(ctx, instance, chaosPod)
 	}
 
-	return nil
+	return r.Client.Status().Update(ctx, instance)
 }
 
 func (r *DisruptionReconciler) handleChaosPodTermination(ctx context.Context, instance *chaosv1beta1.Disruption, chaosPod corev1.Pod) {
@@ -820,35 +840,18 @@ func (r *DisruptionReconciler) handleChaosPodTermination(ctx context.Context, in
 	}
 }
 
-// safeIncrementRunCount safely increments the RunCount with mutex protection
-func (r *DisruptionReconciler) safeIncrementRunCount(instance *chaosv1beta1.Disruption) {
-	r.instanceMutex.Lock()
-	defer r.instanceMutex.Unlock()
-
-	instance.Status.RunCount++
-	r.log.Infow("incremented disruption run count", "runCount", instance.Status.RunCount, "disruptionName", instance.Name)
-}
-
-// safeUpdateTargetInjectionStatus safely updates target injection status with mutex protection
+// safeUpdateTargetInjectionStatus safely updates target injection status using thread-safe methods
 func (r *DisruptionReconciler) safeUpdateTargetInjectionStatus(instance *chaosv1beta1.Disruption, chaosPod corev1.Pod, status chaostypes.DisruptionTargetInjectionStatus, since metav1.Time) {
-	r.instanceMutex.Lock()
-	defer r.instanceMutex.Unlock()
-
-	if instance.Status.TargetInjections == nil {
-		instance.Status.TargetInjections = make(chaosv1beta1.TargetInjections)
-	}
-
-	if instance.Status.TargetInjections[chaosPod.Labels[chaostypes.TargetLabel]] == nil {
-		instance.Status.TargetInjections[chaosPod.Labels[chaostypes.TargetLabel]] = make(chaosv1beta1.TargetInjectorMap)
-	}
-
+	target := chaosPod.Labels[chaostypes.TargetLabel]
 	disruptionKindName := chaostypes.DisruptionKindName(chaosPod.Labels[chaostypes.DisruptionKindLabel])
 
-	instance.Status.TargetInjections[chaosPod.Labels[chaostypes.TargetLabel]][disruptionKindName] = chaosv1beta1.TargetInjection{
+	injection := chaosv1beta1.TargetInjection{
 		InjectorPodName: chaosPod.Name,
 		InjectionStatus: status,
 		Since:           since,
 	}
+
+	instance.SetTargetInjection(target, disruptionKindName, injection)
 }
 
 // selectTargets will select min(count, all matching targets) random targets (pods or nodes depending on the disruption level)
@@ -877,7 +880,7 @@ func (r *DisruptionReconciler) selectTargets(ctx context.Context, instance *chao
 		r.log.Errorw("error getting matching targets", "error", err)
 	}
 
-	instance.Status.RemoveDeadTargets(matchingTargets)
+	instance.RemoveDeadTargets(matchingTargets)
 
 	// instance.Spec.Count is a string that either represents a percentage or a value, we do the translation here
 	targetsCount, err := instance.GetTargetsCountAsInt(len(matchingTargets), true)
@@ -911,10 +914,10 @@ func (r *DisruptionReconciler) selectTargets(ctx context.Context, instance *chao
 
 	if cTargetsCount < dTargetsCount {
 		// not enough targets: pick more targets from eligibleTargets
-		instance.Status.AddTargets(dTargetsCount-cTargetsCount, eligibleTargets)
+		instance.AddTargets(dTargetsCount-cTargetsCount, eligibleTargets)
 	} else if cTargetsCount > dTargetsCount {
 		// too many targets: remove random extra targets
-		instance.Status.RemoveTargets(cTargetsCount - dTargetsCount)
+		instance.RemoveTargets(cTargetsCount - dTargetsCount)
 	}
 
 	r.log.Debugw("updating instance status with targets selected for injection", "selectedTargets", instance.Status.TargetInjections.GetTargetNames())
@@ -922,7 +925,7 @@ func (r *DisruptionReconciler) selectTargets(ctx context.Context, instance *chao
 	instance.Status.SelectedTargetsCount = len(instance.Status.TargetInjections)
 	instance.Status.IgnoredTargetsCount = totalAvailableTargetsCount - targetsCount
 
-	return nil
+	return r.Client.Status().Update(ctx, instance)
 }
 
 // getMatchingTargets fetches all existing target fitting the disruption's selector
@@ -981,6 +984,19 @@ func (r *DisruptionReconciler) handleMetricSinkError(err error) {
 	if err != nil {
 		r.log.Errorw("error sending a metric", "error", err)
 	}
+}
+
+// updateStatus updates the disruption status, leveraging Kubernetes optimistic locking for efficiency.
+// Status update errors are logged but do not fail the reconcile to avoid blocking critical operations.
+func (r *DisruptionReconciler) updateStatus(ctx context.Context, instance *chaosv1beta1.Disruption) error {
+	if err := r.Client.Status().Update(ctx, instance); err != nil {
+		r.log.Warnw("failed to update disruption status - will retry in next reconcile",
+			"error", err,
+			"disruptionName", instance.Name,
+			"namespace", instance.Namespace)
+		return err
+	}
+	return nil
 }
 
 func (r *DisruptionReconciler) recordEventOnDisruption(instance *chaosv1beta1.Disruption, eventReason chaosv1beta1.EventReason, optionalMessage string, targetName string) {
@@ -1202,7 +1218,7 @@ func (r *DisruptionReconciler) getEligibleTargets(ctx context.Context, instance 
 
 	for _, target := range potentialTargets {
 		// skip current targets
-		if instance.Status.HasTarget(target) {
+		if instance.HasTarget(target) {
 			continue
 		}
 
