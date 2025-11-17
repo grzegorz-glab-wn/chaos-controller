@@ -22,7 +22,6 @@ import (
 	"math/rand"
 	"reflect"
 	"strings"
-	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -79,9 +78,6 @@ type DisruptionReconciler struct {
 	DeleteOnly                    bool
 	FinalizerDeletionDelay        time.Duration
 	ConcurrentInjectorPodCreation int
-
-	// Mutex to protect concurrent access to instance modifications
-	instanceMutex sync.Mutex
 }
 
 const TargetsCountLogLimit = 50
@@ -515,7 +511,7 @@ func (r *DisruptionReconciler) startInjection(ctx context.Context, instance *cha
 	}
 
 	for _, chaosPod := range chaosPods {
-		if !instance.Status.HasTarget(chaosPod.Labels[chaostypes.TargetLabel]) {
+		if !instance.HasTarget(chaosPod.Labels[chaostypes.TargetLabel]) {
 			r.deleteChaosPod(ctx, instance, chaosPod)
 		} else {
 			chaosPodsMap[chaosPod.Labels[chaostypes.TargetLabel]][chaosPod.Labels[chaostypes.DisruptionKindLabel]] = true
@@ -642,9 +638,10 @@ func (r *DisruptionReconciler) createChaosPods(ctx context.Context, instance *ch
 
 	// All pods processed successfully
 
-	// Increment run count if we created new pods in this cycle (now thread-safe)
+	// Increment run count if we created new pods in this cycle
 	if newPodsCreated {
-		r.safeIncrementRunCount(instance)
+		instance.Status.RunCount++
+		r.log.Infow("incremented disruption run count", "runCount", instance.Status.RunCount, "disruptionName", instance.Name)
 	}
 
 	return nil
@@ -820,35 +817,19 @@ func (r *DisruptionReconciler) handleChaosPodTermination(ctx context.Context, in
 	}
 }
 
-// safeIncrementRunCount safely increments the RunCount with mutex protection
-func (r *DisruptionReconciler) safeIncrementRunCount(instance *chaosv1beta1.Disruption) {
-	r.instanceMutex.Lock()
-	defer r.instanceMutex.Unlock()
 
-	instance.Status.RunCount++
-	r.log.Infow("incremented disruption run count", "runCount", instance.Status.RunCount, "disruptionName", instance.Name)
-}
-
-// safeUpdateTargetInjectionStatus safely updates target injection status with mutex protection
+// safeUpdateTargetInjectionStatus safely updates target injection status using thread-safe methods
 func (r *DisruptionReconciler) safeUpdateTargetInjectionStatus(instance *chaosv1beta1.Disruption, chaosPod corev1.Pod, status chaostypes.DisruptionTargetInjectionStatus, since metav1.Time) {
-	r.instanceMutex.Lock()
-	defer r.instanceMutex.Unlock()
-
-	if instance.Status.TargetInjections == nil {
-		instance.Status.TargetInjections = make(chaosv1beta1.TargetInjections)
-	}
-
-	if instance.Status.TargetInjections[chaosPod.Labels[chaostypes.TargetLabel]] == nil {
-		instance.Status.TargetInjections[chaosPod.Labels[chaostypes.TargetLabel]] = make(chaosv1beta1.TargetInjectorMap)
-	}
-
+	target := chaosPod.Labels[chaostypes.TargetLabel]
 	disruptionKindName := chaostypes.DisruptionKindName(chaosPod.Labels[chaostypes.DisruptionKindLabel])
 
-	instance.Status.TargetInjections[chaosPod.Labels[chaostypes.TargetLabel]][disruptionKindName] = chaosv1beta1.TargetInjection{
+	injection := chaosv1beta1.TargetInjection{
 		InjectorPodName: chaosPod.Name,
 		InjectionStatus: status,
 		Since:           since,
 	}
+
+	instance.SetTargetInjection(target, disruptionKindName, injection)
 }
 
 // selectTargets will select min(count, all matching targets) random targets (pods or nodes depending on the disruption level)
@@ -877,7 +858,7 @@ func (r *DisruptionReconciler) selectTargets(ctx context.Context, instance *chao
 		r.log.Errorw("error getting matching targets", "error", err)
 	}
 
-	instance.Status.RemoveDeadTargets(matchingTargets)
+	instance.RemoveDeadTargets(matchingTargets)
 
 	// instance.Spec.Count is a string that either represents a percentage or a value, we do the translation here
 	targetsCount, err := instance.GetTargetsCountAsInt(len(matchingTargets), true)
@@ -911,10 +892,10 @@ func (r *DisruptionReconciler) selectTargets(ctx context.Context, instance *chao
 
 	if cTargetsCount < dTargetsCount {
 		// not enough targets: pick more targets from eligibleTargets
-		instance.Status.AddTargets(dTargetsCount-cTargetsCount, eligibleTargets)
+		instance.AddTargets(dTargetsCount-cTargetsCount, eligibleTargets)
 	} else if cTargetsCount > dTargetsCount {
 		// too many targets: remove random extra targets
-		instance.Status.RemoveTargets(cTargetsCount - dTargetsCount)
+		instance.RemoveTargets(cTargetsCount - dTargetsCount)
 	}
 
 	r.log.Debugw("updating instance status with targets selected for injection", "selectedTargets", instance.Status.TargetInjections.GetTargetNames())
@@ -1202,7 +1183,7 @@ func (r *DisruptionReconciler) getEligibleTargets(ctx context.Context, instance 
 
 	for _, target := range potentialTargets {
 		// skip current targets
-		if instance.Status.HasTarget(target) {
+		if instance.HasTarget(target) {
 			continue
 		}
 
