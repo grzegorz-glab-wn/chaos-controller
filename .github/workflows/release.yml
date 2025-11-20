@@ -61,6 +61,10 @@ jobs:
           sed -i "s/^version:.*/version: $CHART_VERSION/" ./chart/Chart.yaml
           echo "Updated chart version to: $CHART_VERSION"
 
+          # Update default image tag in values.yaml
+          sed -i "s/tag: latest/tag: ${GITHUB_REF_NAME}/" ./chart/values.yaml
+          echo "Updated default image tag to: ${GITHUB_REF_NAME}"
+
           export HELM_EXPERIMENTAL_OCI=1
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username ${{ github.actor }} --password-stdin
           helm package ./chart/

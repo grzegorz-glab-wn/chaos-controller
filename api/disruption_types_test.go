@@ -16,14 +16,16 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("DisruptionStatus.RemoveDeadTargets Test", func() {
+var _ = Describe("Disruption.RemoveDeadTargets Test", func() {
 	var matchingTargets []string
-	var status *v1beta1.DisruptionStatus
+	var disruption *v1beta1.Disruption
 
 	BeforeEach(func() {
 		rand.New(rand.NewSource(time.Now().UnixNano()))
-		status = &v1beta1.DisruptionStatus{
-			TargetInjections: makeValidTargetInjections(),
+		disruption = &v1beta1.Disruption{
+			Status: v1beta1.DisruptionStatus{
+				TargetInjections: makeValidTargetInjections(),
+			},
 		}
 	})
 
@@ -38,14 +40,14 @@ var _ = Describe("DisruptionStatus.RemoveDeadTargets Test", func() {
 				"target-4",
 				"target-5",
 			}
-			saveTargets = status.TargetInjections.DeepCopy()
+			saveTargets = disruption.Status.TargetInjections.DeepCopy()
 		})
 
 		When("matchingTargets contains exactly all the current targets", func() {
 			It("expects status.TargetInjections to be intact", func() {
-				status.RemoveDeadTargets(matchingTargets)
-				Expect(status.TargetInjections).To(HaveLen(5))
-				Expect(status.TargetInjections).To(BeEquivalentTo(saveTargets))
+				disruption.RemoveDeadTargets(matchingTargets)
+				Expect(disruption.Status.TargetInjections).To(HaveLen(5))
+				Expect(disruption.Status.TargetInjections).To(BeEquivalentTo(saveTargets))
 			})
 		})
 
@@ -55,8 +57,8 @@ var _ = Describe("DisruptionStatus.RemoveDeadTargets Test", func() {
 			})
 
 			It("expects status.TargetInjection to be full", func() {
-				status.RemoveDeadTargets(matchingTargets)
-				Expect(status.TargetInjections).To(HaveLen(5))
+				disruption.RemoveDeadTargets(matchingTargets)
+				Expect(disruption.Status.TargetInjections).To(HaveLen(5))
 			})
 		})
 
@@ -71,9 +73,9 @@ var _ = Describe("DisruptionStatus.RemoveDeadTargets Test", func() {
 			})
 
 			It("expects status.TargetInjections to be limited to alive targets", func() {
-				status.RemoveDeadTargets(matchingTargets)
-				Expect(status.TargetInjections).To(HaveLen(randCount))
-				targetNames := status.TargetInjections.GetTargetNames()
+				disruption.RemoveDeadTargets(matchingTargets)
+				Expect(disruption.Status.TargetInjections).To(HaveLen(randCount))
+				targetNames := disruption.Status.TargetInjections.GetTargetNames()
 				sort.Strings(targetNames)
 				sort.Strings(matchingTargets)
 				Expect(targetNames).Should(BeEquivalentTo(matchingTargets))
@@ -84,12 +86,12 @@ var _ = Describe("DisruptionStatus.RemoveDeadTargets Test", func() {
 	When("matchingTarget has no element", func() {
 		BeforeEach(func() {
 			matchingTargets = []string{}
-			Expect(status.TargetInjections).To(HaveLen(5))
+			Expect(disruption.Status.TargetInjections).To(HaveLen(5))
 		})
 
 		It("expects status.TargetInjection to be empty", func() {
-			status.RemoveDeadTargets(matchingTargets)
-			Expect(status.TargetInjections).To(BeEmpty())
+			disruption.RemoveDeadTargets(matchingTargets)
+			Expect(disruption.Status.TargetInjections).To(BeEmpty())
 		})
 	})
 
@@ -105,8 +107,8 @@ var _ = Describe("DisruptionStatus.RemoveDeadTargets Test", func() {
 		})
 
 		It("expects status.TargetInjection to be empty", func() {
-			status.RemoveDeadTargets(matchingTargets)
-			Expect(status.TargetInjections).To(BeEmpty())
+			disruption.RemoveDeadTargets(matchingTargets)
+			Expect(disruption.Status.TargetInjections).To(BeEmpty())
 		})
 	})
 })
@@ -146,17 +148,20 @@ func makeValidTargetInjections() v1beta1.TargetInjections {
 	}
 }
 
-var _ = Describe("DisruptionStatus.AddTargets Test", func() {
-	var status, oldStatus *v1beta1.DisruptionStatus
+var _ = Describe("Disruption.AddTargets Test", func() {
+	var disruption *v1beta1.Disruption
+	var oldStatus *v1beta1.DisruptionStatus
 	var newTargetsCount int
 	var eligibleTargets v1beta1.TargetInjections
 
 	BeforeEach(func() {
 		rand.New(rand.NewSource(time.Now().UnixNano()))
-		status = &v1beta1.DisruptionStatus{
-			TargetInjections: makeValidTargetInjections(),
+		disruption = &v1beta1.Disruption{
+			Status: v1beta1.DisruptionStatus{
+				TargetInjections: makeValidTargetInjections(),
+			},
 		}
-		oldStatus = status.DeepCopy()
+		oldStatus = disruption.Status.DeepCopy()
 	})
 
 	When("newTargetsCount is between [1;5]", func() {
@@ -170,8 +175,8 @@ var _ = Describe("DisruptionStatus.AddTargets Test", func() {
 			})
 
 			It("expects status.TargetInjection to stay the same", func() {
-				status.AddTargets(newTargetsCount, eligibleTargets)
-				Expect(status.TargetInjections).To(Equal(oldStatus.TargetInjections))
+				disruption.AddTargets(newTargetsCount, eligibleTargets)
+				Expect(disruption.Status.TargetInjections).To(Equal(oldStatus.TargetInjections))
 			})
 		})
 
@@ -212,8 +217,8 @@ var _ = Describe("DisruptionStatus.AddTargets Test", func() {
 			})
 
 			It("expects newTargets to transfer", func() {
-				status.AddTargets(newTargetsCount, eligibleTargets)
-				Expect(status.TargetInjections).To(HaveLen(5 + newTargetsCount))
+				disruption.AddTargets(newTargetsCount, eligibleTargets)
+				Expect(disruption.Status.TargetInjections).To(HaveLen(5 + newTargetsCount))
 			})
 		})
 	})
@@ -228,22 +233,24 @@ var _ = Describe("DisruptionStatus.AddTargets Test", func() {
 		})
 
 		It("expects all available targets to transfer", func() {
-			oldTargetsCount := len(status.TargetInjections)
+			oldTargetsCount := len(disruption.Status.TargetInjections)
 			lenEligibleTargets := len(eligibleTargets)
-			status.AddTargets(newTargetsCount, eligibleTargets)
-			Expect(status.TargetInjections).To(HaveLen(oldTargetsCount + lenEligibleTargets))
+			disruption.AddTargets(newTargetsCount, eligibleTargets)
+			Expect(disruption.Status.TargetInjections).To(HaveLen(oldTargetsCount + lenEligibleTargets))
 		})
 	})
 })
 
-var _ = Describe("DisruptionStatus.RemoveTargets Test", func() {
+var _ = Describe("Disruption.RemoveTargets Test", func() {
 	var toRemoveTargetsCount int
-	var status *v1beta1.DisruptionStatus
+	var disruption *v1beta1.Disruption
 
 	BeforeEach(func() {
 		rand.New(rand.NewSource(time.Now().UnixNano()))
-		status = &v1beta1.DisruptionStatus{
-			TargetInjections: makeValidTargetInjections(),
+		disruption = &v1beta1.Disruption{
+			Status: v1beta1.DisruptionStatus{
+				TargetInjections: makeValidTargetInjections(),
+			},
 		}
 	})
 
@@ -253,8 +260,8 @@ var _ = Describe("DisruptionStatus.RemoveTargets Test", func() {
 		})
 
 		It("expects to remove none of the targets", func() {
-			status.RemoveTargets(toRemoveTargetsCount)
-			Expect(status.TargetInjections).To(HaveLen(5))
+			disruption.RemoveTargets(toRemoveTargetsCount)
+			Expect(disruption.Status.TargetInjections).To(HaveLen(5))
 		})
 	})
 
@@ -264,30 +271,30 @@ var _ = Describe("DisruptionStatus.RemoveTargets Test", func() {
 		})
 
 		It("expects to remove part of the targets", func() {
-			status.RemoveTargets(toRemoveTargetsCount)
-			Expect(status.TargetInjections).To(HaveLen(5 - toRemoveTargetsCount))
+			disruption.RemoveTargets(toRemoveTargetsCount)
+			Expect(disruption.Status.TargetInjections).To(HaveLen(5 - toRemoveTargetsCount))
 		})
 	})
 
 	Context("asks to remove exactly the amount of targets in status.TargetInjection", func() {
 		BeforeEach(func() {
-			toRemoveTargetsCount = len(status.TargetInjections)
+			toRemoveTargetsCount = len(disruption.Status.TargetInjections)
 		})
 
 		It("expects to remove all the targets", func() {
-			status.RemoveTargets(toRemoveTargetsCount)
-			Expect(status.TargetInjections).To(BeEmpty())
+			disruption.RemoveTargets(toRemoveTargetsCount)
+			Expect(disruption.Status.TargetInjections).To(BeEmpty())
 		})
 	})
 
 	Context("asks to remove more than the amount of targets in status.TargetInjection", func() {
 		BeforeEach(func() {
-			toRemoveTargetsCount = rand.Intn(4) + 1 + len(status.TargetInjections)
+			toRemoveTargetsCount = rand.Intn(4) + 1 + len(disruption.Status.TargetInjections)
 		})
 
 		It("expects to remove all the targets", func() {
-			status.RemoveTargets(toRemoveTargetsCount)
-			Expect(status.TargetInjections).To(BeEmpty())
+			disruption.RemoveTargets(toRemoveTargetsCount)
+			Expect(disruption.Status.TargetInjections).To(BeEmpty())
 		})
 	})
 })
