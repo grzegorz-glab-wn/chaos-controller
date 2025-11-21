@@ -186,7 +186,7 @@ func (r *DisruptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				r.log.Infow("instance seems stuck on removal, the deletion time expired, please check manually")
 
 				// Update the status of the 'instance' to reflect that it's stuck on removal.
-				if err := r.updateStatusCritical(ctx, instance); err != nil {
+				if err := r.updateStatus(ctx, instance); err != nil {
 					return ctrl.Result{}, fmt.Errorf("error marking the disruption stuck on removal: %w", err)
 				}
 
@@ -989,10 +989,22 @@ func (r *DisruptionReconciler) handleMetricSinkError(err error) {
 	}
 }
 
-// updateStatus updates the disruption status, leveraging Kubernetes optimistic locking for efficiency.
+// updateStatus updates the disruption status using patch to avoid concurrent map iteration.
 // Status update errors are logged but do not fail the reconcile to avoid blocking critical operations.
 func (r *DisruptionReconciler) updateStatus(ctx context.Context, instance *chaosv1beta1.Disruption) error {
-	if err := r.Client.Status().Update(ctx, instance); err != nil {
+	// Fetch the original instance from the cluster to create a proper patch
+	original := &chaosv1beta1.Disruption{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, original); err != nil {
+		r.log.Warnw("failed to get original disruption for patch",
+			"error", err,
+			"disruptionName", instance.Name,
+			"namespace", instance.Namespace)
+		return err
+	}
+
+	patch := client.MergeFrom(original)
+
+	if err := r.Client.Status().Patch(ctx, instance, patch); err != nil {
 		r.log.Warnw("failed to update disruption status - will retry in next reconcile",
 			"error", err,
 			"disruptionName", instance.Name,
@@ -1000,11 +1012,6 @@ func (r *DisruptionReconciler) updateStatus(ctx context.Context, instance *chaos
 		return err
 	}
 	return nil
-}
-
-// updateStatusCritical updates the disruption status and returns error on failure for critical updates
-func (r *DisruptionReconciler) updateStatusCritical(ctx context.Context, instance *chaosv1beta1.Disruption) error {
-	return r.Client.Status().Update(ctx, instance)
 }
 
 func (r *DisruptionReconciler) recordEventOnDisruption(instance *chaosv1beta1.Disruption, eventReason chaosv1beta1.EventReason, optionalMessage string, targetName string) {
