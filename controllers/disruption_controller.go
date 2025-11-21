@@ -536,29 +536,53 @@ func (r *DisruptionReconciler) startInjection(ctx context.Context, instance *cha
 		maxConcurrentTargets = 30 // Default fallback
 	}
 
-	r.log.Infow("target injection concurrency", "limit", maxConcurrentTargets, "totalTargets", len(instance.Status.TargetInjections))
-	concurrencyLimit := make(chan struct{}, maxConcurrentTargets)
-	errorChan := make(chan error, len(instance.Status.TargetInjections))
+	targets := r.snapshotTargets(instance)
 
-	// Start goroutines for each target
-	for targetName, injections := range instance.Status.TargetInjections {
-		concurrencyLimit <- struct{}{} // Acquire slot
+	r.log.Infow("target injection concurrency", "limit", maxConcurrentTargets, "totalTargets", len(targets))
+	concurrencyLimit := make(chan struct{}, maxConcurrentTargets)
+	errorChan := make(chan error, len(targets))
+
+	for _, target := range targets {
+		concurrencyLimit <- struct{}{}
 		go func(tName string, inj chaosv1beta1.TargetInjectorMap) {
-			defer func() { <-concurrencyLimit }() // Release slot when done
+			defer func() { <-concurrencyLimit }()
 
 			err := r.processTargetForInjection(ctx, instance, tName, inj, chaosPodsMap)
-			errorChan <- err // Send error (or nil)
-		}(targetName, injections)
+			errorChan <- err
+		}(target.name, target.injections)
 	}
 
 	// Collect all results
-	for i := 0; i < len(instance.Status.TargetInjections); i++ {
+	for i := 0; i < len(targets); i++ {
 		if err := <-errorChan; err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+type targetSnapshot struct {
+	name       string
+	injections chaosv1beta1.TargetInjectorMap
+}
+
+// snapshotTargets copies target injections to prevent concurrent map iteration race conditions.
+func (r *DisruptionReconciler) snapshotTargets(instance *chaosv1beta1.Disruption) []targetSnapshot {
+	targets := make([]targetSnapshot, 0, len(instance.Status.TargetInjections))
+
+	for targetName, injections := range instance.Status.TargetInjections {
+		injectionsCopy := make(chaosv1beta1.TargetInjectorMap, len(injections))
+		for k, v := range injections {
+			injectionsCopy[k] = v
+		}
+		targets = append(targets, targetSnapshot{
+			name:       targetName,
+			injections: injectionsCopy,
+		})
+	}
+
+	return targets
 }
 
 // createChaosPods attempts to create all the chaos pods for a given target. If a given chaos pod already exists, it is not recreated.
