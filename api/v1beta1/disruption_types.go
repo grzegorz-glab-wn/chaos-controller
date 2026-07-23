@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	chaosapi "github.com/DataDog/chaos-controller/api"
@@ -33,6 +34,45 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	goyaml "sigs.k8s.io/yaml"
 )
+
+// StatusMutexManager manages mutexes for DisruptionStatus instances by namespaced name
+// +kubebuilder:object:generate=false
+type StatusMutexManager struct {
+	mutexes  map[string]*sync.RWMutex // key: "namespace/name"
+	mapMutex sync.RWMutex             // protects the mutexes map itself
+}
+
+// GetMutex returns a mutex for the given namespace/name, creating one if it doesn't exist
+func (m *StatusMutexManager) GetMutex(namespace, name string) *sync.RWMutex {
+	key := namespace + "/" + name
+
+	m.mapMutex.RLock()
+	if mutex, exists := m.mutexes[key]; exists {
+		m.mapMutex.RUnlock()
+		return mutex
+	}
+	m.mapMutex.RUnlock()
+
+	// Need to create a new mutex
+	m.mapMutex.Lock()
+	defer m.mapMutex.Unlock()
+
+	// Double-check in case another goroutine created it
+	if mutex, exists := m.mutexes[key]; exists {
+		return mutex
+	}
+
+	// Create new mutex
+	newMutex := &sync.RWMutex{}
+	m.mutexes[key] = newMutex
+	return newMutex
+}
+
+// Package-level mutex manager for DisruptionStatus thread-safety
+var disruptionMutexManager = &StatusMutexManager{
+	mutexes: make(map[string]*sync.RWMutex),
+	mapMutex: sync.RWMutex{},
+}
 
 // DisruptionSpec defines the desired state of Disruption
 type DisruptionSpec struct {
@@ -532,6 +572,86 @@ func (d *Disruption) CopyUserInfoToAnnotations(owner metav1.Object) error {
 	}
 
 	return nil
+}
+
+// SetTargetInjection safely sets a target injection with mutex protection.
+// This method is thread-safe and can be called concurrently.
+func (d *Disruption) SetTargetInjection(target string, disruptionKind chaostypes.DisruptionKindName, injection TargetInjection) {
+	mutex := disruptionMutexManager.GetMutex(d.Namespace, d.Name)
+	mutex.Lock()
+	defer mutex.Unlock()
+
+	if d.Status.TargetInjections == nil {
+		d.Status.TargetInjections = make(TargetInjections)
+	}
+	if d.Status.TargetInjections[target] == nil {
+		d.Status.TargetInjections[target] = make(TargetInjectorMap)
+	}
+	d.Status.TargetInjections[target][disruptionKind] = injection
+}
+
+// HasTarget returns true when a target exists in the Target List or returns false.
+// This method is thread-safe and can be called concurrently.
+func (d *Disruption) HasTarget(searchTarget string) bool {
+	mutex := disruptionMutexManager.GetMutex(d.Namespace, d.Name)
+	mutex.RLock()
+	defer mutex.RUnlock()
+
+	_, exists := d.Status.TargetInjections[searchTarget]
+	return exists
+}
+
+// RemoveDeadTargets removes targets not found in matchingTargets from the targets list.
+// This method is thread-safe and can be called concurrently.
+func (d *Disruption) RemoveDeadTargets(matchingTargets []string) {
+	mutex := disruptionMutexManager.GetMutex(d.Namespace, d.Name)
+	mutex.Lock()
+	defer mutex.Unlock()
+
+	desiredTargets := TargetInjections{}
+	targetNames := d.Status.TargetInjections.GetTargetNames()
+
+	for _, matchingTarget := range matchingTargets {
+		if utils.Contains(targetNames, matchingTarget) {
+			desiredTargets[matchingTarget] = d.Status.TargetInjections[matchingTarget]
+		}
+	}
+
+	d.Status.TargetInjections = desiredTargets
+}
+
+// AddTargets adds newTargetsCount random targets from the eligibleTargets list to the Target List.
+// - eligibleTargets should be previously filtered to not include current targets
+// This method is thread-safe and can be called concurrently.
+func (d *Disruption) AddTargets(newTargetsCount int, eligibleTargets TargetInjections) {
+	if len(eligibleTargets) == 0 || newTargetsCount <= 0 {
+		return
+	}
+
+	mutex := disruptionMutexManager.GetMutex(d.Namespace, d.Name)
+	mutex.Lock()
+	defer mutex.Unlock()
+
+	if d.Status.TargetInjections == nil {
+		d.Status.TargetInjections = make(TargetInjections)
+	}
+
+	parseRandomTargets(newTargetsCount, eligibleTargets, func(targetName string) {
+		d.Status.TargetInjections[targetName] = eligibleTargets[targetName]
+		delete(eligibleTargets, targetName)
+	})
+}
+
+// RemoveTargets removes toRemoveTargetsCount random targets from the Target List.
+// This method is thread-safe and can be called concurrently.
+func (d *Disruption) RemoveTargets(toRemoveTargetsCount int) {
+	mutex := disruptionMutexManager.GetMutex(d.Namespace, d.Name)
+	mutex.Lock()
+	defer mutex.Unlock()
+
+	parseRandomTargets(toRemoveTargetsCount, d.Status.TargetInjections, func(targetName string) {
+		delete(d.Status.TargetInjections, targetName)
+	})
 }
 
 // +kubebuilder:object:root=true
@@ -1093,40 +1213,8 @@ func (s DisruptionSpec) Explain() []string {
 	return explanation
 }
 
-// RemoveDeadTargets removes targets not found in matchingTargets from the targets list
-func (status *DisruptionStatus) RemoveDeadTargets(matchingTargets []string) {
-	desiredTargets := TargetInjections{}
 
-	targetNames := status.TargetInjections.GetTargetNames()
 
-	for _, matchingTarget := range matchingTargets {
-		if utils.Contains(targetNames, matchingTarget) {
-			desiredTargets[matchingTarget] = status.TargetInjections[matchingTarget]
-		}
-	}
-
-	status.TargetInjections = desiredTargets
-}
-
-// AddTargets adds newTargetsCount random targets from the eligibleTargets list to the Target List
-// - eligibleTargets should be previously filtered to not include current targets
-func (status *DisruptionStatus) AddTargets(newTargetsCount int, eligibleTargets TargetInjections) {
-	if len(eligibleTargets) == 0 || newTargetsCount <= 0 {
-		return
-	}
-
-	parseRandomTargets(newTargetsCount, eligibleTargets, func(targetName string) {
-		status.TargetInjections[targetName] = eligibleTargets[targetName]
-		delete(eligibleTargets, targetName)
-	})
-}
-
-// RemoveTargets removes toRemoveTargetsCount random targets from the Target List
-func (status *DisruptionStatus) RemoveTargets(toRemoveTargetsCount int) {
-	parseRandomTargets(toRemoveTargetsCount, status.TargetInjections, func(targetName string) {
-		delete(status.TargetInjections, targetName)
-	})
-}
 
 func parseRandomTargets(targetLimit int, targetInjections TargetInjections, callback func(targetName string)) {
 	targetNames := targetInjections.GetTargetNames()
@@ -1141,11 +1229,8 @@ func parseRandomTargets(targetLimit int, targetInjections TargetInjections, call
 	}
 }
 
-// HasTarget returns true when a target exists in the Target List or returns false.
-func (status *DisruptionStatus) HasTarget(searchTarget string) bool {
-	_, exists := status.TargetInjections[searchTarget]
-	return exists
-}
+
+
 
 var NonReinjectableDisruptions = map[chaostypes.DisruptionKindName]struct{}{
 	chaostypes.DisruptionKindGRPCDisruption: {},

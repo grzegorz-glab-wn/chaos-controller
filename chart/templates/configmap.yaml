@@ -97,6 +97,9 @@ data:
     {{- if .Values.controller.clientGoBurst }}
       clientGoBurst: {{ .Values.controller.clientGoBurst }}
     {{- end }}
+    {{- if .Values.controller.concurrentInjectorPodCreation }}
+      concurrentInjectorPodCreation: {{ .Values.controller.concurrentInjectorPodCreation }}
+    {{- end }}
     injector:
       image: {{ template "chaos-controller.format-image" deepCopy .Values.global.chaos.defaultImage | merge .Values.global.oci | merge .Values.injector.image }}
       imagePullSecrets: {{ .Values.injector.image.pullSecrets }}
