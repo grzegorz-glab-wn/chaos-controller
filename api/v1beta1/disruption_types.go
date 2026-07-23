@@ -70,7 +70,7 @@ func (m *StatusMutexManager) GetMutex(namespace, name string) *sync.RWMutex {
 
 // Package-level mutex manager for DisruptionStatus thread-safety
 var disruptionMutexManager = &StatusMutexManager{
-	mutexes: make(map[string]*sync.RWMutex),
+	mutexes:  make(map[string]*sync.RWMutex),
 	mapMutex: sync.RWMutex{},
 }
 
@@ -1213,9 +1213,6 @@ func (s DisruptionSpec) Explain() []string {
 	return explanation
 }
 
-
-
-
 func parseRandomTargets(targetLimit int, targetInjections TargetInjections, callback func(targetName string)) {
 	targetNames := targetInjections.GetTargetNames()
 
@@ -1228,9 +1225,6 @@ func parseRandomTargets(targetLimit int, targetInjections TargetInjections, call
 		callback(targetName)
 	}
 }
-
-
-
 
 var NonReinjectableDisruptions = map[chaostypes.DisruptionKindName]struct{}{
 	chaostypes.DisruptionKindGRPCDisruption: {},
