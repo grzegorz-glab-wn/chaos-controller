@@ -266,30 +266,36 @@ var _ = Describe("AdvancedSelectorsToRequirements", func() {
 	})
 })
 
-var _ = Describe("Check if a target exist into DisruptionStatus targets list", func() {
-	var disruptionStatus DisruptionStatus
+var _ = Describe("Check if a target exist into Disruption targets list", func() {
+	var disruption *Disruption
 
 	BeforeEach(func() {
-		disruptionStatus = DisruptionStatus{
-			TargetInjections: TargetInjections{"test-1": {}},
+		disruption = &Disruption{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-disruption",
+				Namespace: "test-namespace",
+			},
+			Status: DisruptionStatus{
+				TargetInjections: TargetInjections{"test-1": {}},
+			},
 		}
 	})
 
 	Context("with an empty target", func() {
 		It("should return false", func() {
-			Expect(disruptionStatus.HasTarget("")).Should(BeFalse())
+			Expect(disruption.HasTarget("")).Should(BeFalse())
 		})
 	})
 
 	Context("with an existing target", func() {
 		It("should return true", func() {
-			Expect(disruptionStatus.HasTarget("test-1")).Should(BeTrue())
+			Expect(disruption.HasTarget("test-1")).Should(BeTrue())
 		})
 	})
 
 	Context("with an non existing target", func() {
 		It("should return false", func() {
-			Expect(disruptionStatus.HasTarget("test-2")).Should(BeFalse())
+			Expect(disruption.HasTarget("test-2")).Should(BeFalse())
 		})
 	})
 })

@@ -285,7 +285,7 @@ func (d DisruptionTargetHandler) findNotifiableEvents(eventsToSend map[v1beta1.E
 					case strings.Contains(lowerCasedMessage, "readiness probe"):
 						// If the object of the disruption is in the list of targets, it means it has been injected.
 						// The readiness probe is failing during the injection
-						if d.disruption.Status.HasTarget(event.InvolvedObject.Name) {
+						if d.disruption.HasTarget(event.InvolvedObject.Name) {
 							eventsToSend[v1beta1.EventTargetReadinessProbeChangeDuringDisruption] = true
 						} else {
 							eventsToSend[v1beta1.EventTargetReadinessProbeChangeBeforeDisruption] = true

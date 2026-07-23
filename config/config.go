@@ -60,6 +60,7 @@ type controllerConfig struct {
 	DisabledDisruptions              []string                        `json:"disabledDisruptions" yaml:"disabledDisruptions"`
 	ClientGoQPS                      float64                         `json:"clientGoQPS" yaml:"clientGoQPS"`
 	ClientGoBurst                    int                             `json:"clientGoBurst" yaml:"clientGoBurst"`
+	ConcurrentInjectorPodCreation    int                             `json:"concurrentInjectorPodCreation" yaml:"concurrentInjectorPodCreation"`
 }
 
 type controllerWebhookConfig struct {
@@ -584,6 +585,12 @@ func New(client corev1client.ConfigMapInterface, logger *zap.SugaredLogger, osAr
 	mainFS.IntVar(&cfg.Controller.ClientGoBurst, "client-go-burst", 0, "Allowed burst queries for client-go (default 0 to use the default value of the go-client)")
 
 	if err := viper.BindPFlag("controller.clientGoBurst", mainFS.Lookup("client-go-burst")); err != nil {
+		return cfg, err
+	}
+
+	mainFS.IntVar(&cfg.Controller.ConcurrentInjectorPodCreation, "concurrent-injector-pod-creation", 30, "Maximum number of chaos injector pods to create concurrently")
+
+	if err := viper.BindPFlag("controller.concurrentInjectorPodCreation", mainFS.Lookup("concurrent-injector-pod-creation")); err != nil {
 		return cfg, err
 	}
 

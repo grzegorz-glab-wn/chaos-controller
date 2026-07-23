@@ -63,3 +63,7 @@ ebpf/builds/
 
 # Backup files
 *.backup
+
+# Helm chart packages
+*.tgz
+chaos-controller-*.tgz
